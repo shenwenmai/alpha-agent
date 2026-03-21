@@ -108,8 +108,9 @@ export function runConsensus(
 
   if (engine_output.etp_prob > 0.6) {
     // 情绪临界：推演官主导
+    // 有退出窗口时升级为 lock_profit（观望太弱，情绪临界应主动锁盈）
     lead_agent = 'aggressive';
-    directive_key = aggressive.exit_window ? 'observe' : 'pause';
+    directive_key = aggressive.exit_window ? 'lock_profit' : 'pause';
     if (conservative.safety_status !== 'safe') {
       dissentParts.push(`风险官关注安全边际（${Math.round(conservative.survival_prob * 100)}%生存率）`);
     }
