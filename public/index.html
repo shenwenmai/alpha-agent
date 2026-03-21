@@ -332,6 +332,21 @@ function LiveScreen({plan,onEnd}){
   const eng=computeEngine(m,plan);
   const pnlColor=m.net_pnl>0?'text-emerald-400':m.net_pnl<0?'text-red-400':'text-slate-400';
 
+  // #11 注码验证
+  const betVal=parseFloat(bet)||0;
+  const betValid=betVal>=1;
+
+  // #13 时长预警
+  const maxSecs=plan.max_duration_minutes*60;
+  const timeLeft=maxSecs-elapsed;
+  const timeWarn=timeLeft<=0?'exceeded':timeLeft<maxSecs*0.2?'warning':null;
+
+  // #14 连败连胜深度（用于视觉强调）
+  const handsWithStreak=(() => {
+    let streak=0;
+    return hands.map(h=>{ if(h.result==='loss')streak++; else streak=0; return{...h,lossStreak:streak}; });
+  })();
+
   const record=async(result)=>{
     const b=Math.max(1, parseFloat(bet)||plan.base_unit);
 
@@ -378,6 +393,8 @@ function LiveScreen({plan,onEnd}){
         setAgent(analysis);
         lastDirectiveRef.current  = analysis.consensus.directive_key;
         lastAnalysisIdRef.current = hand_analysis_id;
+        // #12 复盘用：把本手 Agent 指令写回 hands 状态
+        setHands(prev=>{const c=[...prev];c[c.length-1]={...c[c.length-1],agentDirective:analysis.consensus.directive_key};return c;});
       }
       catch(e){ setErr('分析暂时失败，已使用规则兜底'); }
       finally{ setLoading(false); }
@@ -393,13 +410,18 @@ function LiveScreen({plan,onEnd}){
   return(
     <div className="min-h-screen max-w-lg mx-auto px-4 py-5 flex flex-col">
       {/* 顶栏 */}
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-3">
         <div>
           <h2 className="text-base font-bold text-white">实时风控</h2>
           <p className="text-xs text-slate-500">第 {hands.length+1} 手 · {fmt(elapsed)}</p>
         </div>
         <span className={`badge-${eng.intervention_level} px-3 py-1 rounded-full text-xs font-bold`}>{eng.intervention_level}</span>
       </div>
+      {timeWarn&&(
+        <div className={`mb-3 px-3 py-2 rounded-xl text-xs text-center font-semibold border ${timeWarn==='exceeded'?'bg-red-500/20 text-red-300 border-red-500/30':'bg-amber-500/10 text-amber-300 border-amber-500/25'}`}>
+          {timeWarn==='exceeded'?'⚠️ 已超过预设时长，请立即停止':'⏰ 剩余 '+Math.ceil(timeLeft/60)+' 分钟，注意准备收盘'}
+        </div>
+      )}
 
       {/* 数据栏 */}
       <div className="grid grid-cols-3 gap-2 mb-4">
@@ -433,15 +455,17 @@ function LiveScreen({plan,onEnd}){
             </button>
           ))}
         </div>
-        <input type="number" value={bet} onChange={e=>setBet(e.target.value)}
-          className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-white text-center text-xl font-bold focus:outline-none focus:border-purple-500 mb-3"/>
+        <input type="number" min="1" value={bet} onChange={e=>setBet(e.target.value)}
+          className={`w-full bg-white/5 border rounded-xl px-4 py-2.5 text-white text-center text-xl font-bold focus:outline-none mb-1 transition ${betValid?'border-white/10 focus:border-purple-500':'border-red-500/60 bg-red-500/5'}`}/>
+        {!betValid&&<p className="text-xs text-red-400 text-center mb-2">注码必须大于 0</p>}
+        {betValid&&<div className="mb-2"/>}
         <div className="grid grid-cols-2 gap-3">
-          <button onClick={()=>record('win')}
-            className="py-4 rounded-xl font-bold text-white text-lg bg-emerald-700 hover:bg-emerald-600 active:scale-95 transition">
+          <button onClick={()=>record('win')} disabled={!betValid}
+            className="py-4 rounded-xl font-bold text-white text-lg bg-emerald-700 hover:bg-emerald-600 active:scale-95 transition disabled:opacity-30 disabled:cursor-not-allowed">
             赢 ✓
           </button>
-          <button onClick={()=>record('loss')}
-            className="py-4 rounded-xl font-bold text-white text-lg bg-red-800 hover:bg-red-700 active:scale-95 transition">
+          <button onClick={()=>record('loss')} disabled={!betValid}
+            className="py-4 rounded-xl font-bold text-white text-lg bg-red-800 hover:bg-red-700 active:scale-95 transition disabled:opacity-30 disabled:cursor-not-allowed">
             输 ✗
           </button>
         </div>
@@ -450,12 +474,23 @@ function LiveScreen({plan,onEnd}){
       {/* 手牌历史小圆点 */}
       {hands.length>0&&(
         <div className="mt-4">
-          <p className="text-xs text-slate-500 mb-2">最近手数（新→旧）</p>
+          <p className="text-xs text-slate-500 mb-2">
+            最近手数（新→旧）
+            {m.current_loss_streak>=3&&<span className="ml-2 text-red-400 font-semibold">⚡ 连输{m.current_loss_streak}手</span>}
+          </p>
           <div className="flex gap-1.5 flex-wrap">
-            {[...hands].reverse().slice(0,24).map(h=>(
+            {[...handsWithStreak].reverse().slice(0,24).map(h=>(
               <div key={h.hand_number}
-                className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold border ${h.result==='win'?'bg-emerald-600/20 text-emerald-400 border-emerald-600/30':'bg-red-600/20 text-red-400 border-red-600/30'}`}>
-                {h.result==='win'?'W':'L'}
+                title={`#${h.hand_number} ${h.result==='win'?'赢':'输'} ¥${h.bet}${h.agentDirective?' · '+DIR[h.agentDirective]?.label:''}`}
+                className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold border transition ${
+                  h.result==='win'
+                    ?'bg-emerald-600/20 text-emerald-400 border-emerald-600/30'
+                    :h.lossStreak>=5?'bg-red-500/70 text-white border-red-400/70'
+                    :h.lossStreak>=3?'bg-red-600/45 text-red-200 border-red-500/50'
+                    :h.lossStreak>=2?'bg-red-600/30 text-red-300 border-red-500/40'
+                    :'bg-red-600/15 text-red-400 border-red-600/25'
+                }`}>
+                {h.result==='win'?'W':h.lossStreak>=5?'!':'L'}
               </div>
             ))}
           </div>
@@ -505,17 +540,25 @@ function ReviewScreen({hands,plan,startTime,onRestart}){
 
       <div className="glass rounded-2xl p-4 mb-5">
         <p className="text-xs text-slate-400 uppercase tracking-wider mb-3">手牌记录</p>
-        <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-          {[...hands].reverse().map(h=>(
-            <div key={h.hand_number} className="flex items-center justify-between py-1 border-b border-white/5 last:border-0">
-              <span className="text-xs text-slate-500">#{h.hand_number}</span>
-              <span className="text-xs text-slate-400">¥{h.bet}</span>
-              <span className={`text-xs font-semibold ${h.result==='win'?'text-emerald-400':'text-red-400'}`}>
-                {h.result==='win'?`+¥${h.bet}`:`-¥${h.bet}`}
-              </span>
-            </div>
-          ))}
+        <div className="space-y-0.5 max-h-72 overflow-y-auto pr-1">
+          {[...hands].reverse().map(h=>{
+            const d=h.agentDirective?DIR[h.agentDirective]:null;
+            return(
+              <div key={h.hand_number} className="flex items-center gap-2 py-1.5 border-b border-white/5 last:border-0">
+                <span className="text-xs text-slate-500 w-7 flex-shrink-0">#{h.hand_number}</span>
+                {d
+                  ?<span className={`text-xs px-1.5 py-0.5 rounded-md font-medium flex-shrink-0 ${d.cls} text-white/90`}>{d.icon}</span>
+                  :<span className="w-7 flex-shrink-0"/>
+                }
+                <span className="text-xs text-slate-400 flex-shrink-0">¥{h.bet}</span>
+                <span className={`text-xs font-semibold ml-auto flex-shrink-0 ${h.result==='win'?'text-emerald-400':'text-red-400'}`}>
+                  {h.result==='win'?`+¥${h.bet}`:`-¥${h.bet}`}
+                </span>
+              </div>
+            );
+          })}
         </div>
+        <p className="text-xs text-slate-600 mt-2 text-center">彩色图标 = 该手触发了 Agent 分析</p>
       </div>
 
       <button onClick={onRestart}
