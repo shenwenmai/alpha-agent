@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent 博弈风控系统</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: { surface: '#12121a', card: '#1a1a2e' }
+        }
+      }
+    };
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body { background: #0a0a0f; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; }
+    .glass { background: rgba(255,255,255,0.04); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.08); }
+    .dir-continue    { background: linear-gradient(135deg,#065f46,#059669); }
+    .dir-reduce_bet  { background: linear-gradient(135deg,#92400e,#d97706); }
+    .dir-observe     { background: linear-gradient(135deg,#1e3a8a,#3b82f6); }
+    .dir-pause       { background: linear-gradient(135deg,#4c1d95,#7c3aed); }
+    .dir-lock_profit { background: linear-gradient(135deg,#134e4a,#14b8a6); }
+    .dir-stop_loss   { background: linear-gradient(135deg,#7f1d1d,#ef4444); }
+    .badge-L0, .badge-L1 { background:rgba(100,116,139,.15); color:#94a3b8; border:1px solid rgba(100,116,139,.3); }
+    .badge-L2 { background:rgba(234,179,8,.1); color:#eab308; border:1px solid rgba(234,179,8,.3); }
+    .badge-L3 { background:rgba(249,115,22,.1); color:#f97316; border:1px solid rgba(249,115,22,.3); }
+    .badge-L4 { background:rgba(239,68,68,.15); color:#ef4444; border:1px solid rgba(239,68,68,.3); }
+    .spin { animation: spin 1s linear infinite; display:inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ─── 配置 ────────────────────────────────────────────────────
+const DIR = {
+  continue:    { label:'继续·保持节奏', icon:'▶', cls:'dir-continue',    text:'text-emerald-300' },
+  reduce_bet:  { label:'降注一级',       icon:'▼', cls:'dir-reduce_bet',  text:'text-amber-300'   },
+  observe:     { label:'观望一手',       icon:'◎', cls:'dir-observe',     text:'text-blue-300'    },
+  pause:       { label:'暂停·冷静',      icon:'⏸', cls:'dir-pause',       text:'text-purple-300'  },
+  lock_profit: { label:'锁盈·建议离桌', icon:'🔒', cls:'dir-lock_profit', text:'text-teal-300'    },
+  stop_loss:   { label:'止损·必须离桌', icon:'🛑', cls:'dir-stop_loss',   text:'text-red-300'     },
+};
+const AGENTS = {
+  conservative: { name:'风险官', sub:'Value Network', icon:'🛡', color:'text-blue-400'   },
+  balanced:     { name:'行为官', sub:'Policy Network', icon:'⚖️', color:'text-purple-400' },
+  aggressive:   { name:'推演官', sub:'MCTS',           icon:'🔮', color:'text-amber-400'  },
+};
+
+// ─── 计算函数 ─────────────────────────────────────────────────
+function computeMetrics(hands, plan, startTime) {
+  if (!hands.length) return {
+    net_pnl:0, current_balance:plan.session_budget,
+    total_hands:0, win_hands:0, loss_hands:0,
+    current_win_streak:0, current_loss_streak:0,
+    net_loss_hands:0, highest_profit:0,
+    distance_to_stop_loss:plan.stop_loss_amount,
+    elapsed_minutes:0, current_bet_unit:plan.base_unit,
+    is_in_lock_profit_zone:false, profit_giveback_rate:0, drawdown_pct:0,
+  };
+  const pnl = hands.reduce((s,h)=>s+(h.result==='win'?h.bet:-h.bet),0);
+  const wins = hands.filter(h=>h.result==='win').length;
+  const losses = hands.length - wins;
+  let ws=0,ls=0,cum=0,peak=0;
+  for(let i=hands.length-1;i>=0;i--){
+    if(hands[i].result==='win'){if(ls===0)ws++;else break;}
+    else{if(ws===0)ls++;else break;}
+  }
+  for(const h of hands){cum+=(h.result==='win'?h.bet:-h.bet);if(cum>peak)peak=cum;}
+  const bal = plan.session_budget + pnl;
+  const giveback = peak>0?Math.max(0,(peak-pnl)/peak*100):0;
+  return {
+    net_pnl:pnl, current_balance:bal,
+    total_hands:hands.length, win_hands:wins, loss_hands:losses,
+    current_win_streak:ws, current_loss_streak:ls,
+    net_loss_hands:losses-wins, highest_profit:peak,
+    distance_to_stop_loss:bal-(plan.session_budget-plan.stop_loss_amount),
+    elapsed_minutes:Math.floor((Date.now()-startTime)/60000),
+    current_bet_unit:hands[hands.length-1].bet,
+    is_in_lock_profit_zone:pnl>=plan.take_profit_amount*0.7,
+    profit_giveback_rate:giveback,
+    drawdown_pct:peak>0?Math.max(0,(peak-pnl)/plan.session_budget*100):0,
+  };
+}
+
+function computeEngine(m, plan) {
+  const sp = Math.max(0,Math.min(1, m.distance_to_stop_loss/plan.stop_loss_amount));
+  const cp = Math.max(0,Math.min(1, 1-sp-0.1));
+  const etp = Math.min(0.9, Math.min(1,m.current_loss_streak/5)*0.6+(m.profit_giveback_rate>50?0.3:0));
+  let lv='L0';
+  if(sp<0.2||cp>0.7)lv='L4';
+  else if(sp<0.35||m.current_loss_streak>=4)lv='L3';
+  else if(sp<0.5||m.current_loss_streak>=3)lv='L2';
+  else if(sp<0.7||m.current_loss_streak>=2)lv='L1';
+  return { survival_prob:+sp.toFixed(3), etp_prob:+etp.toFixed(3), collapse_prob:+cp.toFixed(3), intervention_level:lv, toxic_combos:[], key_moments:[] };
+}
+
+async function callAnalyze(hands, plan, startTime) {
+  const m = computeMetrics(hands,plan,startTime);
+  const e = computeEngine(m,plan);
+  const prev = hands.length>=2?hands[hands.length-2]:null;
+  const last = hands[hands.length-1];
+  const body = {
+    hand_number:hands.length,
+    session_plan:{ session_budget:plan.session_budget, base_unit:plan.base_unit, stop_loss_amount:plan.stop_loss_amount, take_profit_amount:plan.take_profit_amount, max_duration_minutes:180, max_bet_unit:plan.max_bet_unit },
+    metrics:m, engine_output:e,
+    self_check:{ pre_entry_risk_level:e.survival_prob>0.7?'safe':e.survival_prob>0.4?'caution':'warning', pre_entry_lethal_signals:[], pre_entry_checked_ids:[], latest_live_check:{risk_level:e.survival_prob>0.5?'safe':'caution',checked_ids:[]}, hands_since_last_check:hands.length },
+    behavior:{ this_hand_bet:last.bet, last_hand_bet:prev?.bet??plan.base_unit, bet_deviation_pct:(last.bet-plan.base_unit)/plan.base_unit*100, is_violation:last.bet>plan.max_bet_unit, is_timid:last.bet<plan.base_unit*0.5, followed_last_advice:null, consecutive_ignored:0 },
+    active_scene:null, scene_level:e.intervention_level,
+  };
+  const res = await fetch('/api/analyze',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+  if(!res.ok) throw new Error('HTTP '+res.status);
+  return (await res.json()).agent_analysis;
+}
+
+// ─── 公共小组件 ───────────────────────────────────────────────
+function StatBox({label,value,color='text-white'}){
+  return(
+    <div className="glass rounded-xl p-3 text-center">
+      <p className={`text-base font-bold ${color}`}>{value}</p>
+      <p className="text-xs text-slate-500 mt-0.5">{label}</p>
+    </div>
+  );
+}
+
+// ─── 1. 设置页 ────────────────────────────────────────────────
+function SetupScreen({onStart}){
+  const [f,setF]=useState({budget:'',base:'',sl:'',tp:'',maxBet:''});
+  const set=(k,v)=>setF(p=>({...p,[k]:v}));
+  const n=v=>parseFloat(v)||0;
+  const ok=f.budget&&f.base&&n(f.budget)>0&&n(f.base)>0;
+
+  const go=()=>{
+    const p={
+      session_budget:n(f.budget), base_unit:n(f.base),
+      stop_loss_amount:n(f.sl)||n(f.budget)*0.3,
+      take_profit_amount:n(f.tp)||n(f.budget)*0.5,
+      max_bet_unit:n(f.maxBet)||n(f.base)*5,
+    };
+    onStart(p);
+  };
+
+  return(
+    <div className="min-h-screen flex items-center justify-center p-5">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-8">
+          <div className="text-6xl mb-3">♟️</div>
+          <h1 className="text-2xl font-bold text-white mb-1">Agent 风控系统</h1>
+          <p className="text-slate-500 text-sm">三位 AI 顾问实时保护你的资金</p>
+        </div>
+        <div className="glass rounded-2xl p-5 space-y-3">
+          {[
+            {k:'budget',label:'本场预算',ph:'例：5000',req:true},
+            {k:'base',label:'基础底注',ph:'例：100',req:true},
+            {k:'sl',label:'止损金额',ph:'默认预算 × 30%'},
+            {k:'tp',label:'止盈目标',ph:'默认预算 × 50%'},
+            {k:'maxBet',label:'最大注码上限',ph:'默认底注 × 5'},
+          ].map(({k,label,ph,req})=>(
+            <div key={k}>
+              <label className="text-xs text-slate-400 mb-1 block">
+                {label}{req&&<span className="text-purple-400 ml-0.5">*</span>}
+              </label>
+              <input type="number" placeholder={ph} value={f[k]} onChange={e=>set(k,e.target.value)}
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition"/>
+            </div>
+          ))}
+          <button onClick={go} disabled={!ok}
+            className="w-full py-3.5 rounded-xl font-semibold text-white bg-purple-600 hover:bg-purple-500 disabled:opacity-30 disabled:cursor-not-allowed transition active:scale-95 mt-1">
+            开始博弈 →
+          </button>
+        </div>
+        <p className="text-center text-xs text-slate-600 mt-3">风险等级 L2+ 自动触发三Agent圆桌分析</p>
+      </div>
+    </div>
+  );
+}
+
+// ─── 2. 实时记录页 ───────────────────────────────────────────
+function AgentCard({type,data,loading}){
+  const cfg=AGENTS[type];
+  if(loading) return(
+    <div className="glass rounded-xl p-3.5 animate-pulse">
+      <div className="flex items-center gap-2 mb-2">
+        <span>{cfg.icon}</span>
+        <div><div className="h-3.5 bg-white/10 rounded w-16 mb-1"/><div className="h-3 bg-white/5 rounded w-24"/></div>
+      </div>
+      <div className="h-3 bg-white/10 rounded w-full mb-1.5"/><div className="h-3 bg-white/5 rounded w-2/3"/>
+    </div>
+  );
+  if(!data) return null;
+  return(
+    <div className={`glass rounded-xl p-3.5 ${data.veto?'border-red-500/40':'border-transparent'} border`}>
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <span>{cfg.icon}</span>
+          <div>
+            <p className={`text-sm font-semibold ${cfg.color}`}>{cfg.name}</p>
+            <p className="text-xs text-slate-500">{cfg.sub}</p>
+          </div>
+        </div>
+        {data.veto&&<span className="text-xs px-2 py-0.5 bg-red-500/20 text-red-400 rounded-full">否决</span>}
+      </div>
+      <p className="text-xs text-slate-300 mb-1 leading-relaxed">{data.fact_line}</p>
+      <p className="text-xs text-slate-400 leading-relaxed">{data.assessment}</p>
+      {data.veto_reason&&<p className="mt-2 text-xs text-red-400 bg-red-500/10 rounded-lg px-2.5 py-1.5">{data.veto_reason}</p>}
+      <div className="mt-2.5 pt-2.5 border-t border-white/5 flex gap-3 text-xs text-slate-500">
+        {type==='conservative'&&<><span>生存 <b className="text-slate-300">{(data.survival_prob*100).toFixed(0)}%</b></span><span>可承受 <b className="text-slate-300">{data.survival_margin}手</b></span></>}
+        {type==='balanced'&&<><span>偏差 <b className="text-slate-300">{data.deviation_index}/10</b></span>{data.behavior_pattern&&<span className="text-amber-500">{data.behavior_pattern}</span>}</>}
+        {type==='aggressive'&&<><span>崩盘 <b className="text-slate-300">{(data.collapse_prob_10h*100).toFixed(0)}%</b></span>{data.exit_window&&<span className="text-red-400">⚡ 离场窗口</span>}</>}
+      </div>
+    </div>
+  );
+}
+
+function ConsensusBanner({consensus,loading}){
+  if(loading) return(
+    <div className="glass rounded-2xl p-4 flex items-center gap-3 animate-pulse">
+      <div className="w-12 h-12 bg-white/10 rounded-xl flex-shrink-0"/>
+      <div className="flex-1"><div className="h-5 bg-white/10 rounded w-36 mb-2"/><div className="h-3 bg-white/5 rounded w-24"/></div>
+    </div>
+  );
+  if(!consensus) return(
+    <div className="glass rounded-2xl p-4 text-center border border-dashed border-white/10">
+      <p className="text-slate-500 text-sm">风险等级 L0–L1，暂无需分析</p>
+      <p className="text-slate-600 text-xs mt-1">达到 L2 自动触发三Agent圆桌</p>
+    </div>
+  );
+  const d=DIR[consensus.directive_key]??DIR['observe'];
+  const ag=AGENTS[consensus.lead_agent]??AGENTS['balanced'];
+  return(
+    <div className={`${d.cls} rounded-2xl p-4 relative overflow-hidden`}>
+      <div className="absolute inset-0 bg-gradient-to-br from-white/10 to-transparent pointer-events-none"/>
+      <div className="relative flex items-center gap-3">
+        <div className="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center text-xl font-bold flex-shrink-0">{d.icon}</div>
+        <div className="flex-1 min-w-0">
+          <p className="text-white font-bold text-lg leading-tight">{d.label}</p>
+          <p className="text-white/60 text-xs mt-0.5">{ag.icon} {ag.name} 主导{consensus.dissent?' · 有异议':''}</p>
+        </div>
+        <div className="text-right text-xs text-white/60 flex-shrink-0 space-y-0.5">
+          <div>生存 {(consensus.key_metrics.survival_prob*100).toFixed(0)}%</div>
+          <div>崩盘 {(consensus.key_metrics.collapse_prob*100).toFixed(0)}%</div>
+        </div>
+      </div>
+      {consensus.dissent&&<p className="relative mt-2.5 text-xs text-white/60 bg-white/10 rounded-lg px-3 py-1.5">{consensus.dissent}</p>}
+    </div>
+  );
+}
+
+function LiveScreen({plan,onEnd}){
+  const [hands,setHands]=useState([]);
+  const [bet,setBet]=useState(String(plan.base_unit));
+  const [agent,setAgent]=useState(null);
+  const [loading,setLoading]=useState(false);
+  const [err,setErr]=useState(null);
+  const [startTime]=useState(Date.now());
+  const [elapsed,setElapsed]=useState(0);
+
+  useEffect(()=>{
+    const t=setInterval(()=>setElapsed(Math.floor((Date.now()-startTime)/1000)),1000);
+    return()=>clearInterval(t);
+  },[startTime]);
+
+  const fmt=s=>`${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+  const m=computeMetrics(hands,plan,startTime);
+  const eng=computeEngine(m,plan);
+  const pnlColor=m.net_pnl>0?'text-emerald-400':m.net_pnl<0?'text-red-400':'text-slate-400';
+
+  const record=async(result)=>{
+    const b=parseFloat(bet)||plan.base_unit;
+    const newHands=[...hands,{hand_number:hands.length+1,bet:b,result,timestamp:Date.now()}];
+    setHands(newHands);
+    setErr(null);
+    const nm=computeMetrics(newHands,plan,startTime);
+    const ne=computeEngine(nm,plan);
+    if(['L2','L3','L4'].includes(ne.intervention_level)){
+      setLoading(true);setAgent(null);
+      try{ setAgent(await callAnalyze(newHands,plan,startTime)); }
+      catch(e){ setErr('分析暂时失败，已使用规则兜底'); }
+      finally{ setLoading(false); }
+    } else { setAgent(null); }
+  };
+
+  const multis=[0.5,1,2,3,5];
+
+  return(
+    <div className="min-h-screen max-w-lg mx-auto px-4 py-5 flex flex-col">
+      {/* 顶栏 */}
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="text-base font-bold text-white">实时风控</h2>
+          <p className="text-xs text-slate-500">第 {hands.length+1} 手 · {fmt(elapsed)}</p>
+        </div>
+        <span className={`badge-${eng.intervention_level} px-3 py-1 rounded-full text-xs font-bold`}>{eng.intervention_level}</span>
+      </div>
+
+      {/* 数据栏 */}
+      <div className="grid grid-cols-3 gap-2 mb-4">
+        <StatBox label="余额" value={`¥${m.current_balance.toFixed(0)}`}/>
+        <StatBox label="盈亏" value={`${m.net_pnl>=0?'+':''}¥${m.net_pnl.toFixed(0)}`} color={pnlColor}/>
+        <StatBox label="胜率" value={hands.length?`${(m.win_hands/hands.length*100).toFixed(0)}%`:'-'}/>
+      </div>
+
+      {/* 共识指令 */}
+      <ConsensusBanner consensus={agent?.consensus} loading={loading}/>
+
+      {/* 三Agent */}
+      {(loading||agent)&&(
+        <div className="mt-3 grid gap-2">
+          <AgentCard type="conservative" data={agent?.conservative} loading={loading}/>
+          <AgentCard type="balanced"     data={agent?.balanced}     loading={loading}/>
+          <AgentCard type="aggressive"   data={agent?.aggressive}   loading={loading}/>
+        </div>
+      )}
+
+      {err&&<p className="mt-2 text-xs text-amber-400 text-center">{err}</p>}
+
+      {/* 注码输入 */}
+      <div className="mt-4 glass rounded-2xl p-4">
+        <label className="text-xs text-slate-400 uppercase tracking-wider mb-2 block">本手注码</label>
+        <div className="flex gap-1.5 mb-2.5">
+          {multis.map(x=>(
+            <button key={x} onClick={()=>setBet(String(Math.round(plan.base_unit*x)))}
+              className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition ${parseFloat(bet)===plan.base_unit*x?'bg-purple-600 text-white':'bg-white/5 text-slate-400 hover:bg-white/10'}`}>
+              ×{x}
+            </button>
+          ))}
+        </div>
+        <input type="number" value={bet} onChange={e=>setBet(e.target.value)}
+          className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-white text-center text-xl font-bold focus:outline-none focus:border-purple-500 mb-3"/>
+        <div className="grid grid-cols-2 gap-3">
+          <button onClick={()=>record('win')}
+            className="py-4 rounded-xl font-bold text-white text-lg bg-emerald-700 hover:bg-emerald-600 active:scale-95 transition">
+            赢 ✓
+          </button>
+          <button onClick={()=>record('loss')}
+            className="py-4 rounded-xl font-bold text-white text-lg bg-red-800 hover:bg-red-700 active:scale-95 transition">
+            输 ✗
+          </button>
+        </div>
+      </div>
+
+      {/* 手牌历史小圆点 */}
+      {hands.length>0&&(
+        <div className="mt-4">
+          <p className="text-xs text-slate-500 mb-2">最近手数（新→旧）</p>
+          <div className="flex gap-1.5 flex-wrap">
+            {[...hands].reverse().slice(0,24).map(h=>(
+              <div key={h.hand_number}
+                className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold border ${h.result==='win'?'bg-emerald-600/20 text-emerald-400 border-emerald-600/30':'bg-red-600/20 text-red-400 border-red-600/30'}`}>
+                {h.result==='win'?'W':'L'}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 结束按钮 */}
+      <button onClick={()=>onEnd(hands,plan,startTime)}
+        className="mt-5 w-full py-3 rounded-xl text-slate-400 border border-white/10 hover:border-white/20 text-sm transition">
+        结束本局 →
+      </button>
+    </div>
+  );
+}
+
+// ─── 3. 复盘页 ───────────────────────────────────────────────
+function ReviewScreen({hands,plan,startTime,onRestart}){
+  const m=computeMetrics(hands,plan,startTime);
+  const dur=Math.floor((Date.now()-startTime)/60000);
+  const pnlColor=m.net_pnl>0?'text-emerald-400':m.net_pnl<0?'text-red-400':'text-slate-300';
+
+  return(
+    <div className="min-h-screen max-w-lg mx-auto px-4 py-6">
+      <div className="text-center mb-6">
+        <div className="text-5xl mb-2">{m.net_pnl>0?'🏆':m.net_pnl<0?'📉':'〰️'}</div>
+        <h2 className="text-xl font-bold text-white mb-1">局后复盘</h2>
+        <p className="text-slate-500 text-sm">共 {hands.length} 手 · 历时 {dur} 分钟</p>
+      </div>
+
+      <div className="glass rounded-2xl p-5 mb-4 grid grid-cols-2 gap-4">
+        {[
+          {label:'最终盈亏', value:`${m.net_pnl>=0?'+':''}¥${m.net_pnl.toFixed(0)}`, color:pnlColor},
+          {label:'最终余额', value:`¥${m.current_balance.toFixed(0)}`, color:'text-white'},
+          {label:'总胜率',   value:hands.length?`${(m.win_hands/hands.length*100).toFixed(1)}%`:'-', color:'text-slate-300'},
+          {label:'历史最高浮盈', value:`¥${m.highest_profit.toFixed(0)}`, color:'text-emerald-400'},
+        ].map(s=>(
+          <div key={s.label} className="text-center">
+            <p className={`text-xl font-bold ${s.color}`}>{s.value}</p>
+            <p className="text-xs text-slate-500 mt-0.5">{s.label}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="glass rounded-2xl p-4 mb-5">
+        <p className="text-xs text-slate-400 uppercase tracking-wider mb-3">手牌记录</p>
+        <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+          {[...hands].reverse().map(h=>(
+            <div key={h.hand_number} className="flex items-center justify-between py-1 border-b border-white/5 last:border-0">
+              <span className="text-xs text-slate-500">#{h.hand_number}</span>
+              <span className="text-xs text-slate-400">¥{h.bet}</span>
+              <span className={`text-xs font-semibold ${h.result==='win'?'text-emerald-400':'text-red-400'}`}>
+                {h.result==='win'?`+¥${h.bet}`:`-¥${h.bet}`}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <button onClick={onRestart}
+        className="w-full py-4 rounded-xl font-semibold text-white bg-purple-600 hover:bg-purple-500 active:scale-95 transition">
+        开始新局 →
+      </button>
+    </div>
+  );
+}
+
+// ─── App Root ────────────────────────────────────────────────
+function App(){
+  const [screen,setScreen]=useState('setup');
+  const [plan,setPlan]=useState(null);
+  const [sess,setSess]=useState(null);
+
+  return(
+    <div style={{background:'#0a0a0f',minHeight:'100vh'}}>
+      {screen==='setup'&&<SetupScreen onStart={p=>{setPlan(p);setScreen('live');}}/>}
+      {screen==='live'&&<LiveScreen plan={plan} onEnd={(h,p,t)=>{setSess({hands:h,plan:p,startTime:t});setScreen('review');}}/>}
+      {screen==='review'&&sess&&<ReviewScreen {...sess} onRestart={()=>{setSess(null);setPlan(null);setScreen('setup');}}/>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
