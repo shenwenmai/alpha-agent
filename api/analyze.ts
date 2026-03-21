@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { fallbackConservative, fallbackBalanced, fallbackAggressive } from '../src/fallback';
 import { runConsensus } from '../src/consensus';
 import type { AgentPanelRequest, AgentAnalysis } from '../src/types';
+import { saveHandAnalysis } from '../src/db';
 
 // ============================================================
 // /api/analyze — 三Agent并行分析入口
@@ -213,7 +214,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       consensus,
     };
 
-    return res.status(200).json({ agent_analysis });
+    // 写入数据库，返回 ID 供前端追踪行为结果
+    const userId = (req.headers['x-user-id'] as string) || 'anonymous';
+    const sessionId = (req.headers['x-session-id'] as string) || null;
+    const hand_analysis_id = await saveHandAnalysis(input, agent_analysis, userId, sessionId).catch(e => {
+      console.error('[db] save failed:', e.message);
+      return null;
+    });
+
+    return res.status(200).json({ agent_analysis, hand_analysis_id });
 
   } catch (err: any) {
     console.error('[api/analyze] Error:', err);
