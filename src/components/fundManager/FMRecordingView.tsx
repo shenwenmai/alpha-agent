@@ -33,9 +33,9 @@ import FMDangerCheckView, { computeRiskLevel as computeSelfCheckRiskLevel } from
 import RiskControlPanel from './RiskControlPanel';
 import { saveSelfCheckLog } from '../../services/selfCheckService';
 import { getCurrentUserId } from '../../services/supabaseClient';
+import { callAgentRisk } from '../../services/agentRiskService';
 import { theme, FM_COLORS } from '../../theme';
 import type { FMSession, FMAlert, FMMetrics, SelfCheckResult } from '../../types/fundManager';
-import { callAgentRisk } from '../../services/agentRiskService';
 
 interface FMRecordingViewProps {
   onBack: () => void;
@@ -416,8 +416,10 @@ export default function FMRecordingView({ onBack, onEnd }: FMRecordingViewProps)
         }
         setEmotionState(emo);
 
-        // 管道 1+2: 实时 ETP 评估 + 干预评估（原始引擎先跑，得到基线 level）
+        // 管道 1+2: 实时 ETP 评估 + 干预评估
         const { interventionResult: iv, riskResult: rr } = evaluateLiveETP(active, m, emo);
+        const baseLevel = rr?.interventionLevel ?? iv.level;
+        setInterventionResult(iv);
         if (rr) {
           setRiskResult(rr);
         }
@@ -430,19 +432,20 @@ export default function FMRecordingView({ onBack, onEnd }: FMRecordingViewProps)
           setEmotionPanelOpen(true);
         }
 
-        // ── 三Agent系统：L2+ 时异步调用，覆盖干预结果 ──────────
-        const baseLevel = rr?.interventionLevel ?? iv.level;
+        // 干预引擎决定是否弹窗（仅新引擎，旧机制已废弃）
+        if (iv.triggered) {
+          recordInterventionShown(active.id, iv);
+          setShowEmotionIntervention(true);
+        }
+
+        // ── 三Agent异步覆盖：L2+ 时用 AI 替换数学引擎结果 ──
         if (['L2', 'L3', 'L4'].includes(baseLevel)) {
-          // 先用原始引擎结果展示（避免用户等待空白）
-          setInterventionResult(iv);
-          if (iv.triggered) {
-            setShowEmotionIntervention(true);
-          }
-          // 异步调用三Agent，完成后更新为更丰富的 AI 分析
-          callAgentRisk(m, active.plan, active.events, baseLevel).then(agentResult => {
+          callAgentRisk(m, active.plan, active.events, baseLevel as any).then(agentResult => {
             if (agentResult) {
               setInterventionResult(agentResult.interventionResult);
-              // 同步更新 riskResult 的关键指标（供 RiskControlPanel 显示）
+              if (agentResult.interventionResult.triggered) {
+                setShowEmotionIntervention(true);
+              }
               if (rr) {
                 setRiskResult({
                   ...rr,
@@ -451,19 +454,8 @@ export default function FMRecordingView({ onBack, onEnd }: FMRecordingViewProps)
                   interventionLevel: agentResult.level,
                 });
               }
-              if (agentResult.triggered && !showEmotionIntervention) {
-                recordInterventionShown(active.id, agentResult.interventionResult);
-                setShowEmotionIntervention(true);
-              }
             }
-          }).catch(() => {/* 静默失败，保持原始引擎结果 */});
-        } else {
-          // L0/L1：直接使用原始引擎结果
-          setInterventionResult(iv);
-          if (iv.triggered) {
-            recordInterventionShown(active.id, iv);
-            setShowEmotionIntervention(true);
-          }
+          }).catch(() => { /* 静默失败 — 保留原数学引擎结果 */ });
         }
 
         // 后台推送：app 不在前台时发送情绪预警
